@@ -2,6 +2,9 @@ from elections.distribution.distribution import Distribution, CandidateDoesNotEx
 import pytest
 
 
+""" Test adding candidates and scores to distributions using candidate IDs """
+
+
 def test_add_single_candidate() -> None:
     """ Test that we can add a single candidate and that its score can be accessed correctly. """
     d = Distribution(1)
@@ -152,7 +155,7 @@ def test_add_more_to_multiple_candidates_list() -> None:
 
 
 def test_set_to_multiple_candidates_list() -> None:
-    """ Test that we can add more score to candidates using lists of IDs and scores. """
+    """ Test that we can set the score of candidates using lists of IDs and scores. """
     d = Distribution(1)
 
     candidates = ["cand1", "cand2", "cand3"]
@@ -250,7 +253,7 @@ def test_add_more_to_multiple_candidates_tuple() -> None:
 
 
 def test_set_to_multiple_candidates_tuple() -> None:
-    """ Test that we can add more score to candidates using tuples of IDs and scores. """
+    """ Test that we can set the score of candidates using tuples of IDs and scores. """
     d = Distribution(1)
 
     candidates = ("cand1", "cand2", "cand3")
@@ -356,7 +359,7 @@ def test_add_more_to_multiple_candidates_dict() -> None:
 
 
 def test_set_to_multiple_candidates_dict() -> None:
-    """ Test that we can add more score to candidates using a dictionary of IDs and scores. """
+    """ Test that we can set the score of candidates using a dictionary of IDs and scores. """
     d = Distribution(1)
 
     candidates = {

@@ -1,10 +1,10 @@
-from multiprocessing.sharedctypes import Value
-from typing import Any, Dict, Union
+from typing import Any, Union, Iterable
 
 import numpy as np
 import pandas as pd
 
 from .utils import CandidateDoesNotExistError, Utils
+from ..party import Party
 
 
 class Distribution:
@@ -12,27 +12,30 @@ class Distribution:
         """ Base class for various methods that distribute a given number of
         positions/seats etc. based one some score (votes, population, etc.).
 
-        Add candidates with add_score(id, value) or set_score(id, value).
-        Each candidate is identified with a string ID.
+        Add candidates with add_score(id | Party, value) or set_score(id | Party, value).
+        Each candidate is identified with a string ID, or it is a Party object.
 
         Args:
             num_seats: Total number of seats available in the distribution.
         """
         self.num_seats = num_seats
-        self._candidates: Dict[str, Union[int, float]] = {}
-        self._result: Dict[str, int] = {}
+        self._candidates: dict[Union[str, Party], Union[float, int]] = {}
+        self._result: dict[Union[str, Party], int] = {}
         self._is_calculated = False
-        self._true_ratios = None
+        self._true_distribution = None
+        self._score_share = None
 
     def add_scores_list(self,
-                       candidate_ids_list: Union[list[str], tuple[str, ...]],
-                       scores_list: Union[list[float], list[int], tuple[float, ...], tuple[int, ...]],
-                       reset: bool = False) -> None:
-        """ Add some scores to a given list/tuple of candidate IDs.
+                        candidate_ids_list: Union[list[str], tuple[str, ...],
+                                                  list[Party], tuple[Party, ...]],
+                        scores_list: Union[list[float], list[int],
+                                           tuple[float, ...], tuple[int, ...]],
+                        reset: bool = False) -> None:
+        """ Add some scores to a given list/tuple of candidate IDs or list/tuple of Party objects.
         
         Candidates that do not yet exist will be created.
         Args:
-            candidate_ids_list: list/tuple containing the candidate IDs.
+            candidate_ids_list: list/tuple containing the candidate IDs or Party objects.
             scores_list: list/tuple containing matching scores for each candidate ID.
 
         Optional:
@@ -40,16 +43,18 @@ class Distribution:
         """
         if len(candidate_ids_list) != len(scores_list):
             raise ValueError("Need matching number of candidate IDs and scores")
+
         for candidate_id, score in zip(candidate_ids_list, scores_list):
             self.add_score(candidate_id, score, reset = reset)
 
-    def add_scores_dict(self, candidates_dict: Union[dict[str, int], dict[str, float]],
+    def add_scores_dict(self, candidates_dict: Union[dict[str, int], dict[str, float],
+                                                     dict[Party, float], dict[Party, int]],
                         reset: bool = False) -> None:
-        """ Add some scores to a given dictionary of candidate IDs.
+        """ Add some scores to a given dictionary of candidate IDs or Party objects.
         
         Candidates that do not yet exist will be created.
         Args:
-            candidates_dict: dictionary with key/value pairs of IDs and scores to add.
+            candidates_dict: dictionary with key/value pairs of IDs/Parties and scores to add.
 
         Optional:
             reset: Resets the candidate score before adding it.
@@ -58,16 +63,20 @@ class Distribution:
             self.add_score(key, val, reset = reset)
 
     def add_score(self,
-                  candidate_id: Union[str, list[str], tuple[str, ...], dict[str, float], dict[str, int]],
-                  score: Union[int, float, list[float], list[int], tuple[float, ...], tuple[int, ...], None] = None,
+                  candidate_id: Union[str, list[str], tuple[str, ...],
+                                      dict[str, float], dict[str, int],
+                                      Party, list[Party], tuple[Party, ...],
+                                      dict[Party, float], dict[Party, int]],
+                  score: Union[int, list[int], tuple[int, ...],
+                               float, list[float], tuple[float, ...], None] = None,
                   reset: bool=False) -> None:
-        """ Add some score to the given candidate using its ID.
+        """ Add some score to the given candidate using its ID, or a Party object.
         
         If the candidate does not yet exist, it will be created.
-        Multiple can be passed at the same time as two lists/tuples of ids/scores or as a single dictionary.
+        Multiple can be passed at the same time as two lists/tuples of ids/Parties and scores or as a single dictionary (key = ID or Party, value = score).
 
         Args:
-            candidate_id: ID(s) for the candidate or dictionary with key/value pairs of IDs and scores.
+            candidate_id: ID(s) for the candidate or dictionary with key/value pairs of IDs and scores, OR Party object(s) instead of ID(s).
             score(s): Value to add to the candidate.
 
         Optional:
@@ -78,7 +87,7 @@ class Distribution:
                 self.add_scores_dict(candidate_id, reset = reset)
                 return
             else:
-                raise ValueError("If passing candidate ID as dictionary, score argument must be None.")
+                raise ValueError("If passing a dictionary, score argument must be None.")
         elif Utils.is_list_or_tuple(candidate_id) and Utils.is_list_or_tuple(score):
             self.add_scores_list(candidate_id, score, reset = reset) # type: ignore (typing error from str, int and float not matching method input, but we are actually sure they are not str, int or float)
             return
@@ -87,13 +96,16 @@ class Distribution:
         elif Utils.is_list_or_tuple(score): # score is list or tuple, but candidate_id is not
             raise ValueError("Can't pass list/tuple for score but not candidate_id.")
 
-        if not isinstance(candidate_id, str):
-            raise ValueError(f"Incorrect type passed for candidate_id, expected string, got {type(candidate_id)}")
+        if isinstance(score, np.integer):
+            score = int(score)
+
+        if not isinstance(candidate_id, str) and not isinstance(candidate_id, Party):
+            raise ValueError(f"Incorrect type passed for candidate_id, expected string or Party, got {type(candidate_id)}")
         if not (isinstance(score, int) or isinstance(score, float)):
             raise ValueError(f"Incorrect type passed for score, expected float or int, got {type(score)}")
         
         self._is_calculated = False # set _is_calculated to False, because the calculation must be redone if scores have changed
-        self._true_ratios = None
+        self._true_distribution = None
         if reset: self._candidates[candidate_id] = 0
         if candidate_id in self._candidates:
             self._candidates[candidate_id] += score
@@ -101,8 +113,12 @@ class Distribution:
             self._candidates[candidate_id] = score
 
     def set_score(self,
-                  candidate_id: Union[str, list[str], tuple[str, ...], dict[str, float], dict[str, int]],
-                  score: Union[int, float, list[float], list[int], tuple[float, ...], tuple[int, ...], None] = None) -> None:
+                  candidate_id: Union[str, list[str], tuple[str, ...],
+                                      dict[str, float], dict[str, int],
+                                      Party, list[Party], tuple[Party, ...],
+                                      dict[Party, float], dict[Party, int]],
+                  score: Union[int, list[int], tuple[int, ...],
+                         float, list[float], tuple[float, ...], None] = None):
         """ Set the score of some candidate using its ID.
         
         If the candidate does not yet exist, it will be created.
@@ -114,7 +130,7 @@ class Distribution:
         """
         self.add_score(candidate_id, score, reset=True)
 
-    def remove_candidate(self, candidate_id: str) -> None:
+    def remove_candidate(self, candidate_id: Union[str, Party]) -> None:
         """ Remove a candidate from the calculation.
         
         Raises a CandidateDoesNotExistError if the candidate is not added to the distribution.
@@ -131,13 +147,13 @@ class Distribution:
     def calculate(self) -> None:
         raise NotImplementedError("Method must be implemented in a subclass.")
 
-    def __getitem__(self, key: str) -> tuple[Union[float, int], int]:
+    def __getitem__(self, key: Union[str, Party]) -> tuple[Union[float, int], int]:
         """ Return the score of a candidate and its number awarded seats if the calculation has been completed (otherwise -1).
         
         Raises a CandidateDoesNotExistError if the candidate is not yet added.
 
         Args:
-            key: candidate ID
+            key: candidate ID or Party object
 
         Returns:
             A tuple with (score, awarded_seats)
@@ -152,19 +168,32 @@ class Distribution:
             raise CandidateDoesNotExistError("Candidate has not been added to the distribution.")
 
     @property
-    def result(self) -> dict[str, int]:
+    def is_calculated(self) -> bool:
+        """ Return True if the distribution of seats has been calculated. """
+        return self._is_calculated
+
+    @property
+    def result(self) -> dict[Union[str, Party], int]:
         if not self._is_calculated:
             self.calculate()
         return self._result.copy()
 
     @property
-    def true_ratios(self) -> dict[str, float]:
-        """ Returns the true ratio of seats a candidate should get given the total number of seats and its score. """
-        if self._true_ratios is None:
+    def true_distribution(self) -> dict[Union[str, Party], float]:
+        """ Returns the true distribution of seats each candidate should get given the total number of seats and its score. """
+        if self._true_distribution is None:
             score_sum = sum(self._candidates.values())
             divisor = score_sum/self.num_seats
-            self._true_ratios = {key: score/divisor for key, score in self._candidates.items()}
-        return self._true_ratios
+            self._true_distribution = {key: score/divisor for key, score in self._candidates.items()}
+        return self._true_distribution
+
+    @property
+    def score_share(self) -> dict[Union[str, Party], float]:
+        """ Returns the percent of the total score each candidate has received. """
+        if self._score_share is None:
+            score_sum = sum(self._candidates.values())
+            self._score_share = {key: score/score_sum*100 for key, score in self._candidates.items()}
+        return self._score_share
 
     @property
     def num_seats(self) -> int:
@@ -173,8 +202,18 @@ class Distribution:
     @num_seats.setter
     def num_seats(self, value: int) -> None:
         self._is_calculated = False
-        self._true_ratios = None
+        self._true_distribution = None
         self._num_seats = value
+
+    @property
+    def name_list(self) -> list[str]:
+        """ A list of all candidate names/IDs """
+        output = [
+            item.name if isinstance(item, Party)
+            else item
+            for item in self._candidates.keys()
+        ]
+        return output
 
 
 class StLague(Distribution):
@@ -199,6 +238,7 @@ class StLague(Distribution):
         Returns:
             Three dataframes: score matrix, divisor matrix, awarded seats matrix
         """
+        self._result = {}
         num_candidates = len(self._candidates)
 
         if num_candidates == 0:
@@ -228,12 +268,13 @@ class StLague(Distribution):
         for candidate_id, seats in zip(self._candidates.keys(), awarded_seats):
             self._result[candidate_id] = seats
         
+
         score_df = pd.DataFrame(score_matrix)
-        score_df.columns = list(self._candidates.keys())
         divisor_df = pd.DataFrame(divisor_matrix)
-        divisor_df.columns = list(self._candidates.keys())
         awarded_seats_df = pd.DataFrame(awarded_seats_matrix)
-        awarded_seats_df.columns = list(self._candidates.keys())
+        score_df.columns = self.name_list
+        divisor_df.columns = self.name_list
+        awarded_seats_df.columns = self.name_list
 
         self._is_calculated = True
         return score_df, divisor_df, awarded_seats_df
@@ -246,6 +287,9 @@ class StLague(Distribution):
     def initial_divisor(self, value: Union[float, int]) -> None:
         self._is_calculated = False
         self._initial_divisor = value
+
+    def __repr__(self) -> str:
+        return f"<{__name__}.StLague, num_seats={self.num_seats}, initial_divisor={self.initial_divisor} at {hex(id(self))}>"
 
 
 class DHondt(StLague):
@@ -261,6 +305,9 @@ class DHondt(StLague):
         """ Calculate the divisor for a given number of awarded seats """
         return awarded_seats + 1
 
+    def __repr__(self) -> str:
+        return f"<{__name__}.DHondt distribution with {self.num_seats} seats, initial_divisor={self.initial_divisor} at {hex(id(self))}>"
+
 
 class FirstPastThePost(Distribution):
     def __init__(self, num_seats: int) -> None:
@@ -269,6 +316,7 @@ class FirstPastThePost(Distribution):
 
     def calculate(self) -> None:
         """ Calculate the distribution. """
+        self._result = {}
         if len(self._candidates) == 0:
             return
 
@@ -280,7 +328,10 @@ class FirstPastThePost(Distribution):
             else:
                 self._result[key] = 0
         self._is_calculated = True
-        
+    
+    def __repr__(self) -> str:
+        return f"<{__name__}.FirstPastThePost, num_seats={self.num_seats} at {hex(id(self))}>"
+
 
 class HuntingtonHill(Distribution):
     def __init__(self,
@@ -293,6 +344,7 @@ class HuntingtonHill(Distribution):
 
     def calculate(self) -> Union[tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame], tuple[None, ...]]:
         """ Calculate the distribution. """
+        self._result = {}
         num_candidates = len(self._candidates)
 
         if num_candidates == 0:
@@ -334,9 +386,9 @@ class HuntingtonHill(Distribution):
         divisor_df = pd.DataFrame(divisor_matrix)
         awarded_seats_df = pd.DataFrame(awarded_seats_matrix)
         if len(score_matrix) > 0:
-            score_df.columns = list(self._candidates.keys())
-            divisor_df.columns = list(self._candidates.keys())
-            awarded_seats_df.columns = list(self._candidates.keys())
+            score_df.columns = self.name_list
+            divisor_df.columns = self.name_list
+            awarded_seats_df.columns = self.name_list
 
         self._is_calculated = True
         return score_df, divisor_df, awarded_seats_df
@@ -359,6 +411,9 @@ class HuntingtonHill(Distribution):
         self._is_calculated = False
         self._threshold = value
 
+    def __repr__(self) -> str:
+        return f"<{__name__}.HuntingtonHill, num_seats={self.num_seats}, initial_seats={self.initial_seats}, threshold={self.threshold} at {hex(id(self))}>"
+
 
 class Hamilton(Distribution):
     def __init__(self, num_seats: int, quota: str = "hare") -> None:
@@ -378,6 +433,7 @@ class Hamilton(Distribution):
 
     def calculate(self) -> Union[tuple[Any, Any], tuple[None, None]]:
         """ Calculate the distribution. """
+        self._result = {}
         num_candidates = len(self._candidates)
 
         if num_candidates == 0:
@@ -401,6 +457,9 @@ class Hamilton(Distribution):
 
         return integer_scores.astype(int), fractions
 
+    def __repr__(self) -> str:
+        return f"<{__name__}.Hamilton, num_seats={self.num_seats}, quota={self.quota} at {hex(id(self))}>"
+
 
 class Adams(Distribution):
     def __init__(self, num_seats: int) -> None:
@@ -408,6 +467,7 @@ class Adams(Distribution):
 
     def calculate(self) -> Union[float, None]:
         """ Calculate the distribution. """
+        self._result = {}
         num_candidates = len(self._candidates)
 
         if num_candidates == 0:
@@ -433,3 +493,6 @@ class Adams(Distribution):
         self._is_calculated = True
 
         return divisor # return the final divisor
+
+    def __repr__(self) -> str:
+        return f"<{__name__}.Adams, num_seats={self.num_seats} at {hex(id(self))}>"

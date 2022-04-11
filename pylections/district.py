@@ -1,6 +1,6 @@
 from typing import Any, Union
 
-from elections.party import Party
+from pylections.party import Party
 from .distribution.distribution import Distribution
 
 
@@ -93,6 +93,7 @@ class District(_District):
 
     def __repr__(self) -> str:
         return f"<{__name__}.District '{self.name}' at {hex(id(self))} with distribution: {self.distribution}>"
+
 
 class NorwegianFylke(District):
     def __init__(self, fylkeid: int,

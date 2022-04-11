@@ -1,4 +1,4 @@
-from elections.distribution.distribution import Distribution, CandidateDoesNotExistError, Party
+from pylections.distribution.distribution import Distribution, CandidateDoesNotExistError, Party
 import pytest
 
 
